@@ -9,7 +9,7 @@ handle MD5, SHA1 and SHA256.
 
 # License
 
-Classic BSD license. See [LICENSE](../blob/master/LICENSE) for more information.
+Classic BSD license. See [LICENSE](../master/LICENSE) for more information.
 
 # Copyright
 
