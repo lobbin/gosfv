@@ -32,35 +32,34 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
+	"github.com/lobbin/gosfv/internal/sfv"
 	"github.com/spf13/cobra"
 )
 
 // verifyCmd represents the verify command
 var verifyCmd = &cobra.Command{
 	Use:   "verify",
-	Short: "A brief description of your command",
-	Long: `A longer description that spans multiple lines and likely contains examples
-and usage of using your command. For example:
-
-Cobra is a CLI library for Go that empowers applications.
-This application is a tool to generate the needed files
-to quickly create a Cobra application.`,
+	Short: "Generate a new verfication file",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("verify called")
+		checksumFiles := sfv.Verify(cmd.Flag("file").Value.String())
+
+		error := false
+		for _, checksumFile := range checksumFiles {
+			fmt.Printf("%s %s\n", checksumFile.Filename, sfv.StatusTypeToString(checksumFile.Status))
+
+			if (checksumFile.Status != sfv.StatusCheckSumOK) {
+				error = true
+			}
+		}
+
+		if error {
+			os.Exit(1)
+		}
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(verifyCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// verifyCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	// verifyCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }

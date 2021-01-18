@@ -36,6 +36,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"regexp"
 	"time"
 
 	"crypto/md5"
@@ -62,6 +63,7 @@ type ChecksumFile struct {
 	Filename     string
 	Filesize     int64
 	Checksum     string
+	ChecksumWant string
 }
 
 type hasherInfo struct {
@@ -74,6 +76,7 @@ const (
 	StatusUnknown ChecksumStatus = iota
 	StatusOK
 	StatusCheckSumOK
+	StatusCheckSumNoMatch
 	StatusFailedCheckSum
 	StatusNotFound
 	StatusNotFile
@@ -103,6 +106,27 @@ func StringToType(t string) ChecksumType {
 	}
 }
 
+func StatusTypeToString(s ChecksumStatus) string {
+	switch s {
+	case StatusOK:
+		return "OK"
+	case StatusCheckSumOK:
+		return "Checksum OK"
+	case StatusCheckSumNoMatch:
+		return "Checksum doesn't match"
+	case StatusFailedCheckSum:
+		return "Checksum calculation failed"
+	case StatusNotFound:
+		return "File not found"
+	case StatusNotFile:
+		return "File not a file"
+	case StatusStatFailed:
+		return "File stat failed"
+	default:
+		return "Unknown"
+	}
+}
+
 func Create(t ChecksumType, files []string) []ChecksumFile {
 	var totalFileSize int64
 	checksumFiles := make([]ChecksumFile, len(files))
@@ -125,10 +149,97 @@ func Create(t ChecksumType, files []string) []ChecksumFile {
 	return checksumFiles
 }
 
-/*func Verify(t checksumType, file string) []ChecksumFile {
-	fmt.
-	return make([]ChecksumFile, 0)
-}*/
+func Verify(file string) []ChecksumFile {
+	totalFileSize, checksumFiles := parseSfvFile(file)
+
+	bar := pb.New64(totalFileSize)
+	bar.Set(pb.Bytes, true)
+	bar.Start()
+
+	for i, _ := range checksumFiles {
+		calculateChecksum(&checksumFiles[i], bar)
+
+		if checksumFiles[i].Status == StatusCheckSumOK &&
+		   checksumFiles[i].Checksum != checksumFiles[i].ChecksumWant {
+			checksumFiles[i].Status = StatusCheckSumNoMatch
+		}
+	}
+
+	bar.Finish()
+
+	return checksumFiles
+}
+
+func parseSfvFile(filename string) (int64, []ChecksumFile) {
+	var totalFileSize int64
+	var file *os.File
+	var err error
+
+	if filename != "" {
+		file, err = os.Open(filename)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		defer file.Close()
+	} else {
+		file = os.Stdin
+	}
+
+	checksumFiles := make([]ChecksumFile, 0)
+
+	scanner := bufio.NewScanner(file)
+	scanner.Split(bufio.ScanLines)
+
+	reCrc32  := regexp.MustCompile(`^([\w\.]+) ([\w]{8})$`)
+	reMd5    := regexp.MustCompile(`^MD5 \(([\w\.]+)\) = ([\w]{32})$`)
+	reSha1   := regexp.MustCompile(`^([\w]{40})  ([\w\.]+)$`)
+	reSha256 := regexp.MustCompile(`^([\w]{64})  ([\w\.]+)$`)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line[0:1] == ";" {
+			continue
+		}
+
+		var checksumFile ChecksumFile
+		if reCrc32.MatchString(line) {
+			matches := reCrc32.FindStringSubmatch(line)
+
+			checksumFile.ChecksumType = TypeCRC32
+			checksumFile.Filename     = matches[1]
+			checksumFile.ChecksumWant = matches[2]
+		} else if reMd5.MatchString(line) {
+			matches := reMd5.FindStringSubmatch(line)
+
+			checksumFile.ChecksumType = TypeMD5
+			checksumFile.Filename     = matches[1]
+			checksumFile.ChecksumWant = matches[2]
+		} else if reSha1.MatchString(line) {
+			matches := reSha1.FindStringSubmatch(line)
+
+			checksumFile.ChecksumType = TypeSHA1
+			checksumFile.Filename     = matches[2]
+			checksumFile.ChecksumWant = matches[1]
+		} else if reSha256.MatchString(line) {
+			matches := reSha256.FindStringSubmatch(line)
+
+			checksumFile.ChecksumType = TypeSHA256
+			checksumFile.Filename     = matches[2]
+			checksumFile.ChecksumWant = matches[1]
+		} else {
+			// Unknown checksum type
+			continue
+		}
+
+		verifyChecksumFile(&checksumFile)
+		totalFileSize += checksumFile.Filesize
+
+		checksumFiles = append(checksumFiles, checksumFile)
+	}
+
+	return totalFileSize, checksumFiles
+}
 
 func WriteToFile(checksumFiles []ChecksumFile, filename string) {
 	var file *os.File
@@ -155,7 +266,7 @@ func WriteToFile(checksumFiles []ChecksumFile, filename string) {
 			case TypeMD5:
 				_, err = file.WriteString(fmt.Sprintf("MD5 (%s) = %s\n", checksumFile.Filename, checksumFile.Checksum))
 			case TypeSHA1:
-				_, err = file.WriteString(fmt.Sprintf("%s  %s", checksumFile.Checksum, checksumFile.Filename))
+				_, err = file.WriteString(fmt.Sprintf("%s  %s\n", checksumFile.Checksum, checksumFile.Filename))
 			case TypeSHA256:
 				_, err = file.WriteString(fmt.Sprintf("%s  %s\n", checksumFile.Checksum, checksumFile.Filename))
 			}
@@ -233,28 +344,51 @@ func calculateChecksum(checksumFile *ChecksumFile, pb *pb.ProgressBar) {
 	}
 }
 
-func createChecksumFile(t ChecksumType, filename string) ChecksumFile {
-	checksumFile := ChecksumFile{t, StatusUnknown, filename, 0, ""}
-
-	file, err := os.Open(filename)
+func verifyChecksumFile(checksumFile *ChecksumFile) {
+	file, err := os.Open(checksumFile.Filename)
+	defer file.Close()
 	if err != nil {
 		checksumFile.Status = StatusNotFound
+		return
 	}
-	defer file.Close()
 
 	fileInfo, err := file.Stat()
 	if err != nil {
 		checksumFile.Status = StatusStatFailed
-		goto end
+		return
 	}
 
 	if fileInfo.IsDir() {
 		checksumFile.Status = StatusNotFile
-		goto end
+		return
 	}
 
 	checksumFile.Status   = StatusOK
 	checksumFile.Filesize = fileInfo.Size()
+}
+
+func createChecksumFile(t ChecksumType, filename string) ChecksumFile {
+	checksumFile := ChecksumFile{t, StatusUnknown, filename, 0, "", ""}
+
+	file, err := os.Open(filename)
+	defer file.Close()
+	if err != nil {
+		checksumFile.Status = StatusNotFound
+	} else {
+		fileInfo, err := file.Stat()
+		if err != nil {
+			checksumFile.Status = StatusStatFailed
+			goto end
+		}
+
+		if fileInfo.IsDir() {
+			checksumFile.Status = StatusNotFile
+			goto end
+		}
+
+		checksumFile.Status   = StatusOK
+		checksumFile.Filesize = fileInfo.Size()
+	}
 
 end:
 	return checksumFile
